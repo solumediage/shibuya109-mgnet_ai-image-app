@@ -1,25 +1,31 @@
-import serverless from "serverless-http";
-import express from "express";
-import cors from "cors";
-import axios from "axios"; // node-fetchの代わりに、より安定したaxiosを使用
+// netlify/functions/generate.js
+import axios from "axios";
 
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: "50mb" }));
+export const handler = async (event, context) => {
+  // ログが出力されるか確認
+  console.log("--- Function Started ---");
 
-const API_KEY = process.env.GOOGLE_AI_STUDIO_API_KEY;
-const MODEL_NAME = process.env.IMAGE_MODEL_NAME;
+  // POSTメソッド以外を弾く
+  if (event.httpMethod !== "POST") {
+    return { statusCode: 405, body: "Method Not Allowed" };
+  }
 
-app.post("/.netlify/functions/generate", async (req, res) => {
-  console.log("--- Function Start ---");
-  
   try {
-    const { prompt, imageBase64 } = req.body;
+    const { prompt, imageBase64 } = JSON.parse(event.body);
+    const API_KEY = process.env.GOOGLE_AI_STUDIO_API_KEY;
+    const MODEL_NAME = process.env.IMAGE_MODEL_NAME;
 
-    if (!API_KEY) throw new Error("API_KEY is missing");
+    if (!API_KEY || !MODEL_NAME) {
+      console.error("Config missing");
+      return { 
+        statusCode: 500, 
+        body: JSON.stringify({ error: "環境変数が設定されていません。" }) 
+      };
+    }
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${API_KEY}`;
     
+    console.log("Calling Gemini API...");
     const response = await axios.post(url, {
       contents: [{
         parts: [
@@ -32,13 +38,21 @@ app.post("/.netlify/functions/generate", async (req, res) => {
 
     const resultImage = response.data.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
 
-    if (!resultImage) throw new Error("No image returned from Gemini");
+    if (!resultImage) {
+      throw new Error("AIから画像が返却されませんでした。");
+    }
 
-    res.json({ image: resultImage });
+    console.log("Success: Image generated");
+    return {
+      statusCode: 200,
+      body: JSON.stringify({ image: resultImage }),
+    };
+
   } catch (error) {
-    console.error("Error details:", error.response?.data || error.message);
-    res.status(500).json({ error: error.message });
+    console.error("Error:", error.response?.data || error.message);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: error.message }),
+    };
   }
-});
-
-export const handler = serverless(app);
+};
