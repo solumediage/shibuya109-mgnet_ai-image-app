@@ -1,0 +1,11 @@
+[build]
+  command = "npm run build"
+  publish = "dist"  # Vueのビルド成果物フォルダ。Viteなら通常 dist です。
+
+[functions]
+  directory = "netlify/functions"
+
+[[redirects]]
+  from = "/generate"
+  to = "/.netlify/functions/generate"
+  status = 200
