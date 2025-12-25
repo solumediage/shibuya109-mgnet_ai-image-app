@@ -182,12 +182,15 @@ const mergeAndGenerate = async () => {
   step.value = 'result';
   loading.value = true;
   try {
-    const res = await axios.post('http://localhost:3001/generate', {
+    // ローカルホストではなく相対パスに変更（Netlify Functionsを呼び出すため）
+    const res = await axios.post('/generate', {
       prompt: PROMPTS[selectedStyle.value],
       imageBase64: mergedBase64
     });
     transformedImg.value = res.data.image;
-  } catch (err) { errorMsg.value = err.message; } finally { loading.value = false; }
+  } catch (err) { 
+    errorMsg.value = "AI生成中にエラーが発生しました: " + (err.response?.data?.error || err.message);
+  } finally { loading.value = false; }
 };
 
 const reset = () => {
