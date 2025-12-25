@@ -1,5 +1,5 @@
 // netlify/functions/generate.js
-import axios from "axios";
+const axios = require("axios");
 
 export const handler = async (event, context) => {
   // ログが出力されるか確認
