@@ -16,19 +16,21 @@
         <video ref="video" autoplay playsinline></video>
         <div v-if="countdown > 0" class="countdown-overlay">{{ countdown }}</div>
       </div>
+      
       <div class="controls">
-        <div class="camera-info">
-          <label>カメラ:</label>
-          <select v-model="selectedCamera" @change="initCamera" class="camera-select">
-            <option v-for="c in cameraDevices" :key="c.deviceId" :value="c.deviceId">
-              {{ c.label || `Camera ${c.deviceId.slice(0, 5)}` }}
+        <div class="camera-selector-area">
+          <label for="camera-select">カメラを選択:</label>
+          <select id="camera-select" v-model="selectedCamera" @change="initCamera" class="camera-select">
+            <option v-for="device in cameraDevices" :key="device.deviceId" :value="device.deviceId">
+              {{ device.label || `カメラ ${cameraDevices.indexOf(device) + 1}` }}
             </option>
           </select>
         </div>
+
         <button @click="startCountdown" :disabled="countdown > 0" class="btn-shutter">
           {{ countdown > 0 ? '準備中...' : '5秒後に撮影' }}
         </button>
-        <button @click="step = 'select'" class="btn-cancel">戻る</button>
+        <button @click="stopCameraAndBack" class="btn-cancel">戻る</button>
       </div>
     </div>
 
@@ -36,7 +38,6 @@
       <h3>{{ loading ? 'AIが生成中...' : '完成！自由にデコってみよう' }}</h3>
       <div class="view-panel">
         <img v-if="transformedImg" :src="'data:image/png;base64,' + transformedImg" class="result-img" />
-        
         <canvas 
           v-if="!loading"
           ref="drawCanvas" 
@@ -44,10 +45,9 @@
           @touchstart.prevent="startDrawing" @touchmove.prevent="draw" @touchend.prevent="stopDrawing"
           width="768" height="1024"
         ></canvas>
-
         <div v-if="loading" class="loading-overlay">
           <div class="spinner"></div>
-          <p>AIが{{ styleNames[selectedStyle] }}に仕立て直しています...</p>
+          <p>AIが仕立て直しています...</p>
         </div>
       </div>
 
@@ -69,7 +69,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
 import axios from 'axios';
 
 const step = ref('select');
@@ -77,12 +77,15 @@ const selectedStyle = ref('');
 const countdown = ref(0);
 const loading = ref(false);
 const errorMsg = ref('');
-
 const video = ref(null);
 const drawCanvas = ref(null);
 const hiddenCanvas = ref(null);
+
+// カメラ関連の状態
 const cameraDevices = ref([]);
 const selectedCamera = ref('');
+const currentStream = ref(null);
+
 const transformedImg = ref(null);
 const isDrawing = ref(false);
 const penColor = ref('#ff0000');
@@ -94,54 +97,76 @@ const styleNames = {
 };
 
 const PROMPTS = {
-  samurai: `Completely replace the person's current outfit, jeans, and sneakers with a full-body set of Kamakura-period "O-yoroi" armor. NO face mask (Menpo), face must be fully visible. Photorealistic.`,
-  otaku: `Completely replace the person's current outfit with a realistic "90s Akihabara Otaku" style. A thin, folded bandana around forehead. A slender anime poster rolled into a thin rod-like cylinder poking out from a backpack. Photorealistic.`,
+  samurai: "Completely replace the person's outfit with samurai armor. Photorealistic.",
+  otaku: "90s Akihabara Otaku style, bandana, anime poster in backpack. Photorealistic.",
   jirai: "Gothic Lolita Jirai-kei black dress, Hime-cut hair. Photorealistic.",
-  sumo: "professional Sumo wrestler (Rikishi), traditional silk Mawashi belt, powerful physique. Photorealistic.",
-  kappogi: "traditional Japanese white Kappogi apron over kimono. Photorealistic.",
-  tobi: "Japanese construction worker 'Tobi-fuku', baggy trousers, Tabi boots. Photorealistic.",
-  decora: "Decora fashion, colorful hair clips, plastic jewelry, Harajuku style. Photorealistic.",
-  walolita: "Wa-Lolita fashion, Kimono-Lolita fusion, frilly petticoat. Photorealistic.",
-  yankee: "Japanese Yankee 'Tokkou-fuku' long coat with gold kanji embroidery. Photorealistic.",
-  monk: "modern Japanese monk, high-quality black Samue robe. Photorealistic."
+  sumo: "Sumo wrestler (Rikishi), Mawashi belt. Photorealistic.",
+  kappogi: "Japanese white Kappogi apron. Photorealistic.",
+  tobi: "Japanese construction worker Tobi-fuku. Photorealistic.",
+  decora: "Decora fashion, colorful hair clips, Harajuku style. Photorealistic.",
+  walolita: "Wa-Lolita fashion, Kimono fusion. Photorealistic.",
+  yankee: "Japanese Yankee Tokkou-fuku coat. Photorealistic.",
+  monk: "Japanese monk Samue robe. Photorealistic."
 };
 
-const getDevices = async () => {
+// 利用可能なカメラ一覧を取得
+const updateCameraList = async () => {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
     const devices = await navigator.mediaDevices.enumerateDevices();
-    cameraDevices.value = devices.filter(d => d.kind === 'videoinput');
-    stream.getTracks().forEach(track => track.stop());
+    cameraDevices.value = devices.filter(device => device.kind === 'videoinput');
+    // デフォルトカメラの設定
     if (cameraDevices.value.length > 0 && !selectedCamera.value) {
       selectedCamera.value = cameraDevices.value[0].deviceId;
     }
   } catch (err) {
-    errorMsg.value = "カメラのアクセス許可を確認してください。";
+    errorMsg.value = "カメラ一覧の取得に失敗しました。";
   }
-};
-
-const selectStyle = (key) => {
-  selectedStyle.value = key;
-  step.value = 'camera';
-  setTimeout(async () => {
-    await getDevices();
-    await initCamera();
-  }, 100);
 };
 
 const initCamera = async () => {
-  if (!selectedCamera.value) return;
-  if (video.value && video.value.srcObject) {
-    video.value.srcObject.getTracks().forEach(track => track.stop());
+  // 既存のストリームがあれば停止
+  if (currentStream.value) {
+    currentStream.value.getTracks().forEach(track => track.stop());
   }
+
+  if (!selectedCamera.value) return;
+
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: { ideal: selectedCamera.value }, width: 768, height: 1024 }
+      video: { 
+        deviceId: { exact: selectedCamera.value },
+        width: { ideal: 768 },
+        height: { ideal: 1024 }
+      }
     });
-    if (video.value) video.value.srcObject = stream;
+    currentStream.value = stream;
+    if (video.value) {
+      video.value.srcObject = stream;
+    }
   } catch (err) {
-    errorMsg.value = "カメラ起動エラー";
+    errorMsg.value = "カメラの起動に失敗しました。外付けカメラの接続を確認してください。";
   }
+};
+
+const selectStyle = async (key) => {
+  selectedStyle.value = key;
+  step.value = 'camera';
+  // 初回のみ権限許可を得るためにダミーの起動を行い、リストを更新
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    stream.getTracks().forEach(t => t.stop());
+    await updateCameraList();
+    await initCamera();
+  } catch (e) {
+    errorMsg.value = "カメラの使用を許可してください。";
+  }
+};
+
+const stopCameraAndBack = () => {
+  if (currentStream.value) {
+    currentStream.value.getTracks().forEach(track => track.stop());
+  }
+  step.value = 'select';
 };
 
 const startCountdown = () => {
@@ -156,19 +181,24 @@ const startCountdown = () => {
 };
 
 const captureAndGenerate = async () => {
-  // カメラから画像を取得
   const tempCanvas = document.createElement('canvas');
   tempCanvas.width = 768; tempCanvas.height = 1024;
   tempCanvas.getContext('2d').drawImage(video.value, 0, 0, 768, 1024);
   const base64 = tempCanvas.toDataURL('image/png').split(',')[1];
   
-  // ステップを結果表示へ進め、生成開始
+  // カメラを止める
+  if (currentStream.value) {
+    currentStream.value.getTracks().forEach(track => track.stop());
+  }
+
   step.value = 'result';
   loading.value = true;
   errorMsg.value = '';
 
+  const endpoint = import.meta.env.DEV ? 'http://localhost:3001/generate' : '/generate';
+
   try {
-    const res = await axios.post('/generate', {
+    const res = await axios.post(endpoint, {
       prompt: PROMPTS[selectedStyle.value],
       imageBase64: base64
     });
@@ -194,16 +224,13 @@ const draw = (e) => {
 };
 const clearCanvas = () => { if(drawCanvas.value) drawCanvas.value.getContext('2d').clearRect(0, 0, 768, 1024); };
 
-// --- 画像保存機能 ---
-const downloadImage = async () => {
+const downloadImage = () => {
   const ctx = hiddenCanvas.value.getContext('2d');
   const aiImg = new Image();
   aiImg.src = 'data:image/png;base64,' + transformedImg.value;
   aiImg.onload = () => {
     ctx.drawImage(aiImg, 0, 0, 768, 1024);
-    if (drawCanvas.value) {
-      ctx.drawImage(drawCanvas.value, 0, 0);
-    }
+    if (drawCanvas.value) ctx.drawImage(drawCanvas.value, 0, 0);
     const link = document.createElement('a');
     link.download = `transformed-${selectedStyle.value}.png`;
     link.href = hiddenCanvas.value.toDataURL('image/png');
@@ -217,24 +244,35 @@ const reset = () => {
 </script>
 
 <style scoped>
-.app-container { max-width: 900px; margin: 0 auto; text-align: center; font-family: sans-serif; padding-bottom: 50px; }
-.style-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 15px; padding: 20px; }
-.style-card { height: 80px; border-radius: 10px; border: 2px solid #ddd; background: #fff; cursor: pointer; font-weight: bold; }
-.view-panel { position: relative; width: 450px; height: 600px; margin: 0 auto; background: #000; border-radius: 15px; overflow: hidden; border: 4px solid #333; }
+.app-container { max-width: 900px; margin: 0 auto; text-align: center; font-family: 'Helvetica Neue', Arial, sans-serif; padding-bottom: 50px; color: #333; }
+.style-grid { color: #000; display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 15px; padding: 20px; }
+.style-card { color: #000; height: 80px; border-radius: 12px; border: 2px solid #eee; background: #fff; cursor: pointer; font-weight: bold; transition: all 0.3s; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+.style-card:hover { transform: translateY(-2px); border-color: #42b983; background: #f0fff4; }
+
+.view-panel { position: relative; width: 450px; height: 600px; margin: 0 auto; background: #1a1a1a; border-radius: 20px; overflow: hidden; border: 8px solid #333; box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
 video, .result-img { width: 100%; height: 100%; object-fit: cover; }
 canvas { position: absolute; inset: 0; z-index: 5; cursor: crosshair; }
-.countdown-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 100px; color: white; background: rgba(0,0,0,0.3); z-index: 10; }
-.loading-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.8); color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 20; }
-.toolbar { display: flex; justify-content: center; align-items: center; gap: 15px; padding: 15px; background: #f0f0f0; margin: 10px 0; border-radius: 10px; }
-.camera-select { padding: 5px; border-radius: 5px; margin-left: 10px; }
-.controls { margin-top: 20px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
-button { padding: 12px 24px; border-radius: 50px; border: none; cursor: pointer; font-weight: bold; }
-.btn-shutter { background: #e74c3c; color: white; width: 220px; }
-.btn-primary { background: #42b983; color: white; }
-.btn-download { background: #3498db; color: white; }
-.btn-cancel { background: #7f8c8d; color: white; }
-.btn-small { padding: 5px 15px; border-radius: 5px; background: #fff; border: 1px solid #ccc; }
-.spinner { width: 40px; height: 40px; border: 4px solid #f3f3f3; border-top: 4px solid #42b983; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 10px; }
+
+.camera-selector-area { margin: 15px 0; padding: 10px; background: #f8f9fa; border-radius: 10px; display: inline-block; }
+.camera-select { padding: 8px 12px; border-radius: 6px; border: 1px solid #ccc; margin-left: 10px; min-width: 200px; font-size: 14px; }
+
+.countdown-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 120px; color: white; background: rgba(0,0,0,0.4); z-index: 10; font-weight: bold; text-shadow: 0 0 20px rgba(0,0,0,0.5); }
+.loading-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.85); color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 20; }
+
+.toolbar { display: flex; justify-content: center; align-items: center; gap: 20px; padding: 15px; background: #f1f3f5; margin: 20px 0; border-radius: 15px; }
+.tool-item { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: bold; }
+
+.controls { margin-top: 20px; display: flex; flex-direction: column; gap: 12px; align-items: center; }
+button { padding: 14px 28px; border-radius: 50px; border: none; cursor: pointer; font-weight: bold; transition: opacity 0.2s; }
+button:disabled { cursor: not-allowed; opacity: 0.6; }
+
+.btn-shutter { background: #ff4757; color: white; width: 250px; font-size: 1.2em; box-shadow: 0 4px 15px rgba(255, 71, 87, 0.3); }
+.btn-primary { background: #2ed573; color: white; }
+.btn-download { background: #1e90ff; color: white; }
+.btn-cancel { background: #a4b0be; color: white; }
+.btn-small { padding: 8px 16px; border-radius: 8px; background: #fff; border: 1px solid #ddd; }
+
+.spinner { width: 50px; height: 50px; border: 5px solid rgba(255,255,255,0.2); border-top: 5px solid #2ed573; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 15px; }
 @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-.error { color: #e74c3c; font-weight: bold; }
+.error { color: #ff4757; font-weight: bold; background: #fff5f5; padding: 10px; border-radius: 8px; margin-top: 20px; display: inline-block; }
 </style>
